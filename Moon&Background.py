@@ -21,11 +21,11 @@ SPIF_SENDCHANGE = 0x02
 EXTENSIONS = {
     "IMAGE" : (".jpg", ".jpeg", ".png", ".bmp"),
     "ICON" : (".ico"),
-    "SHORTCUT" : (".lnk")
+    "SHORTCUT" : (".lnk"),
 }
 
 _user32 = ctypes.windll.user32
-_user32.SystemParametersInfoW.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_wchar, ctypes.c_uint]
+_user32.SystemParametersInfoW.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
 _user32.SystemParametersInfoW.restype = ctypes.c_int
 
 _shell32 = ctypes.windll.shell32
@@ -33,13 +33,19 @@ _shell32.SHChangeNotify.argtypes = [  ctypes.c_long, ctypes.c_uint, ctypes.c_wch
 _shell32.SHChangeNotify.restype = None
 
 def notify_item_changed(path: Path) -> None:
-   ok = 1
+   _shell32.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, str(path), None)
 
-def get_parameteres(item):
-    interval = None
-    while(interval == None):
-        interval = int(input(f"How oftern to cycle {item} in seconds? "))
-    return interval
+def get_interval(item: str) -> int:
+    while True:
+        raw = input(f"How often to cycle {item} in seconds? ").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            print("Please enter a whole number.")
+            continue
+        if value > 0:
+            return value
+        print("The interval must be greater than 0.")
 
 
 def apply_style(style: str) -> None:
@@ -65,22 +71,32 @@ def apply_style(style: str) -> None:
 def get_shortcuts():
     return
 
-def get_files(folder, file_type):
+def get_files(folder: Path, file_type: str) -> list[Path]:
+    extensions = EXTENSIONS[file_type]
     files = []
     if folder.is_dir():
-        ext = EXTENSIONS[file_type]
         files = sorted(
-            (p for p in folder.iterdir() if p.is_file() and (p.suffix.lower() in ext)), #Extensions.type contails p sufix 
-            key=lambda p:p.name.lower(),
+            (p for p in folder.iterdir()
+             if p.is_file() and p.suffix.lower() in extensions),
+            key=lambda p: p.name.lower(),
         )
     if not files:
-        exit_with_message(
-            f"No files in {folder}"
-        )
-        return
+        exit_with_message(f"No {file_type.lower()} files in {folder}")
     return files
 
-async def set_wallpaper(images, interval):
+
+def set_wallpaper(path: Path) -> None:
+    ok = _user32.SystemParametersInfoW(
+        SPI_SETDESKWALLPAPER,
+        0,
+        str(path.resolve()),
+        SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+    )
+    if not ok:
+        raise ctypes.WinError()
+
+
+async def wallpaper_loop(images, interval):
     index = 0
     while True:
         image = images[index]
@@ -90,11 +106,12 @@ async def set_wallpaper(images, interval):
         except Exception as exc:
             print(f"Wallpaper failed: {exc}")
             return  # stop this job; the other keeps running
-
+ 
         index = (index + 1) % len(images)
         await asyncio.sleep(interval)
 
-async def set_icon(shell, shortcut_path, icons, interval):
+
+async def icon_loop(shell, shortcut_path, icons, interval):
     index = 0
     while True:
         icon = icons[index]
@@ -107,7 +124,7 @@ async def set_icon(shell, shortcut_path, icons, interval):
         except Exception as exc:
             print(f"Icon failed: {exc}")
             return
-
+ 
         index = (index + 1) % len(icons)
         await asyncio.sleep(interval)
 
@@ -121,7 +138,7 @@ def exit_with_message(message: str, code: int = 1) -> None:
 async def main() -> None:
     parser = argparse.ArgumentParser()  
     parser.add_argument('--style', choices=WALLPAPER_STYLES, default=None)
-    parser.add_argument('--symetric', choices={True, False}, default=False) 
+    parser.add_argument('--symetric', action="store_true") 
     args = parser.parse_args()  
 
     bg_folder = Path(__file__).resolve().parent / "Wallpapers"
@@ -134,47 +151,40 @@ async def main() -> None:
     shortcuts = get_files(desktop, "SHORTCUT")
 
     print("Choose the shortcut to cycle:")
-    for i, shortcut_file in enumerate(shortcuts, start = 1):
+    for i, shortcut_file in enumerate(shortcuts, start=1):
         print(f"{i}. {shortcut_file.stem}")
     try:
-        selection = int(input("Enter its number").strip())
+        selection = int(input("Enter its number: ").strip())
     except ValueError:
         selection = 0
-
+ 
     if not 1 <= selection <= len(shortcuts):
         exit_with_message("Invalid selection.")
-
-    if args.symetric == True and (len(bg_images) != len(ic_images)):
-        exit_with_message(f"The amount of icons:{len(ic_images)} don't mach the background:{len(bg_images)}")
-
+    shortcut_path = shortcuts[selection - 1]
+ 
+    if args.symetric and len(bg_images) != len(ic_images):
+        exit_with_message(
+            f"The number of icons ({len(ic_images)}) doesn't match "
+            f"the number of wallpapers ({len(bg_images)})."
+        )
+ 
     if args.style:
         try:
             apply_style(args.style)
         except Exception as exc:
             exit_with_message(f"Could not set wallpaper style: {exc}")
-
-    if(not args.symetric):
-        ic_cycle = get_parameteres("icons")
-    bg_cycle = get_parameteres("backgrounds")
-
-    shortcut_path = shortcuts[selection]
-
-    if(args.symetric):
-        print(f"Cycling {len(bg_images)} wallpapers and {len(ic_images)} icons every {bg_cycle // 60} minutes. "
-            "Press Ctrl+C to stop.")
-    else:
-        print(f"Cycling {len(bg_images)} wallpapers every {bg_cycle} seconds. "
-            "Press Ctrl+C to stop.")
-        print(f"Cycling {len(ic_images)} icons every {ic_cycle} seconds. "
-                    "Press Ctrl+C to stop.")
-
-    try:
-        await asyncio.gather(
-            set_wallpaper(bg_images, bg_cycle),
-            set_icon(shell, shortcut_path, ic_images, ic_cycle),
-        )
-    except KeyboardInterrupt:
-        print("\nStopped")
+ 
+    bg_cycle = get_interval("wallpapers" if not args.symetric else "wallpapers and icons")
+    ic_cycle = bg_cycle if args.symetric else get_interval("icons")
+ 
+    print(f"Cycling {len(bg_images)} wallpapers every {bg_cycle} seconds.")
+    print(f"Cycling {len(ic_images)} icons every {ic_cycle} seconds.")
+    print("Press Ctrl+C to stop.")
+ 
+    await asyncio.gather(
+        wallpaper_loop(bg_images, bg_cycle),
+        icon_loop(shell, shortcut_path, ic_images, ic_cycle),
+    )
 
 if __name__ == "__main__":
     main()
